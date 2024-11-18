@@ -11,12 +11,12 @@
 Plugin for the HyperQueue meta scheduler.
 """
 import re
-from typing import Union
+from typing import Union, Any
 
 from aiida.common.extendeddicts import AttributeDict
 from aiida.common.exceptions import FeatureNotAvailable
 from aiida.schedulers import Scheduler, SchedulerError
-from aiida.schedulers.datastructures import JobInfo, JobState, JobResource, JobTemplate
+from aiida.schedulers.datastructures import JobInfo, JobState, JobResource, NodeNumberJobResource, JobTemplate
 
 # Mapping of HyperQueue states to AiiDA `JobState`s
 _MAP_STATUS_HYPERQUEUE = {
@@ -28,10 +28,11 @@ _MAP_STATUS_HYPERQUEUE = {
 }
 
 
-class HyperQueueJobResource(JobResource):
+class HyperQueueJobResource(NodeNumberJobResource):
     """Class for HyperQueue job resources."""
 
-    _default_fields = ('num_mpiprocs', 'num_cores', 'memory_Mb')
+    _default_fields = ('num_machines', 'num_mpiprocs_per_machine', 'num_cpus',
+                       'memory_Mb')
 
     def __init__(self, **kwargs):
         """
@@ -52,22 +53,15 @@ class HyperQueueJobResource(JobResource):
         :raises ValueError: if the resources are invalid or incomplete
         """
 
-        resources = AttributeDict()
+        resources = super().validate_resources(**kwargs)
 
         try:
-            resources.num_cores = int(kwargs.pop('num_cores'))
+            resources.num_cores_per_machine = int(
+                kwargs.pop('num_cores_per_machine'))
         except (KeyError, ValueError) as exception:
             raise ValueError(
-                '`num_cores` must be specified and must be an integer'
+                '`num_cores_per_machine` must be specified and must be an integer'
             ) from exception
-
-        try:
-            resources.num_mpiprocs = int(kwargs.pop('num_mpiprocs'))
-        except KeyError:
-            resources.num_mpiprocs = int(resources.num_cores)
-        except ValueError as exception:
-            raise ValueError(
-                '`num_mpiprocs` must be an integer') from exception
 
         try:
             resources.memory_Mb = int(kwargs.pop('memory_Mb'))
@@ -77,15 +71,6 @@ class HyperQueueJobResource(JobResource):
             raise ValueError('`memory_Mb` must be an integer') from exception
 
         return resources
-
-    @classmethod
-    def accepts_default_mpiprocs_per_machine(cls):
-        """Return True if this subclass accepts a `default_mpiprocs_per_machine` key, False otherwise."""
-        return True
-
-    def get_tot_num_mpiprocs(self):
-        """Return the total number of cpus of this job resource."""
-        return self.num_mpiprocs
 
 
 class HyperQueueScheduler(Scheduler):
@@ -137,8 +122,14 @@ class HyperQueueScheduler(Scheduler):
             # priority is 0.
             hq_options.append(f'--priority={job_tmpl.priority}')
 
-        if job_tmpl.job_resource.num_cores:
-            hq_options.append(f'--cpus={job_tmpl.job_resource.num_cores}')
+        if job_tmpl.job_resource.num_machines > 1:
+            hq_options.append(f'--nodes={job_tmpl.job_resource.num_machines}')
+            # HQ will request the full resources in case of multi-node tasks
+            # https://it4innovations.github.io/hyperqueue/v0.19.0/jobs/multinode/
+            # Moreover, --cpus and --nodes are mutual exlusive
+        elif job_tmpl.job_resource.num_cores_per_machine:
+            hq_options.append(
+                f'--cpus={job_tmpl.job_resource.num_cores_per_machine}')
 
         return '#HQ ' + ' '.join(hq_options)
 
@@ -287,3 +278,13 @@ class HyperQueueScheduler(Scheduler):
             return False
 
         return True
+
+    # def _get_detailed_job_info_command(self, job_id: str) -> dict[str, Any]:
+    #     """Return the command to run to get the detailed information on a job,
+    #     even after the job has finished.
+
+    #     The output text is just retrieved, and returned for logging purposes.
+    #     --parsable split the fields with a pipe (|), adding a pipe also at
+    #     the end.
+    #     """
+    #     return f"sacct --format=$(sacct --helpformat | tr -s '\n' ' ' | tr ' ' ',') --parsable --jobs={job_id}"
